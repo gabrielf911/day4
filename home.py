@@ -14,6 +14,8 @@ import chromadb
 import streamlit as st
 from openai import OpenAI
 
+from agent import render_agent_tab
+
 
 APP_DIR = Path(__file__).resolve().parent
 DB_DIR = APP_DIR / "chroma_db"
@@ -152,6 +154,9 @@ def index_upload(upload, collection, chunk_size: int, overlap: int) -> int:
 
 	uploaded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 	base_metadata = extract_metadata(text, upload.name, upload.size, uploaded_at)
+	existing = collection.get(where={"source_id": base_metadata["source_id"]}, limit=1, include=["metadatas"])
+	if existing["ids"] and existing["metadatas"][0].get("size_bytes") == upload.size:
+		return len(collection.get(where={"source_id": base_metadata["source_id"]}, include=[])["ids"])
 	collection.delete(where={"source_id": base_metadata["source_id"]})
 	content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 	ids, documents, metadatas = [], [], []
@@ -340,7 +345,7 @@ metric_a.metric("Documents indexed", sources_indexed)
 metric_b.metric("Searchable passages", total_chunks)
 metric_c.metric("Retrieval", "ChromaDB · cosine")
 
-library_tab, ask_tab, report_tab = st.tabs(["Library", "Ask the collection", "Client report"])
+library_tab, ask_tab, report_tab, agent_tab = st.tabs(["Library", "Ask the collection", "Client report", "Research agent"])
 
 with library_tab:
 	st.subheader("Document library")
@@ -430,3 +435,6 @@ with report_tab:
 			"Download report as Markdown", data=report, file_name="client-research-report.md",
 			mime="text/markdown", icon="⬇️",
 		)
+
+with agent_tab:
+	render_agent_tab(collection, ai_client, model, result_limit)

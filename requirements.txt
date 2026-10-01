@@ -3,3 +3,4 @@ openai
 python-dotenv
 chromadb
 pysqlite3-binary
+python-docx
