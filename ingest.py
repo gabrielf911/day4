@@ -32,6 +32,22 @@ COLLECTION_NAME = "client_document_chunks"
 COLLECTION_METADATA = {"hnsw:space": "cosine", "description": "Uploaded client research documents"}
 MAX_FILE_BYTES = 20 * 1024 * 1024
 SKIP_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".ds_store"}
+CODE_SUFFIXES = {".py", ".md", ".json", ".yml", ".yaml", ".toml", ".ipynb", ".cfg", ".ini", ".lock"}
+IGNORE_NAMES = {"requirements.txt", "license", "readme", ".gitignore"}
+IGNORE_DIRS = {"reusable_code", "node_modules", "__pycache__", "venv", ".venv", "__macosx"}
+
+
+def wanted(name: str) -> bool:
+    """False for code, config, hidden and junk files (so a whole repo can be ingested safely)."""
+    path = Path(name)
+    if any(part.startswith(".") for part in path.parts):
+        return False
+    if any(part.lower() in IGNORE_DIRS for part in path.parts[:-1]):
+        return False
+    if path.name.lower() in IGNORE_NAMES:
+        return False
+    return path.suffix.lower() not in SKIP_SUFFIXES | CODE_SUFFIXES
+
 
 DOC_TYPES = ["email", "contract", "board_paper", "other"]
 
@@ -130,17 +146,21 @@ def sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def classify(text: str, path: str) -> str:
-    p = path.lower()
-    for key, label in (
-        ("email", "email"),
-        ("contract", "contract"),
-        ("agreement", "contract"),
-        ("board", "board_paper"),
-        ("minutes", "board_paper"),
-    ):
-        if key in p:
+KEYWORD_TYPES = (("email", "email"), ("contract", "contract"), ("agreement", "contract"), ("board", "board_paper"), ("minutes", "board_paper"))
+
+
+def _by_keyword(value: str):
+    for key, label in KEYWORD_TYPES:
+        if key in value:
             return label
+    return None
+
+
+def classify(text: str, path: str) -> str:
+    parts = Path(path).parts
+    label = _by_keyword("/".join(parts[:-1]).lower()) or _by_keyword(parts[-1].lower()) if parts else None
+    if label:
+        return label
     head = text[:1500].lower()
     if re.search(r"^(from|to|subject):", head, re.M):
         return "email"
@@ -296,13 +316,9 @@ def index_document(collection, raw: bytes, path: str, chunk_size: int = 1000, ov
 def iter_zip(data: bytes):
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
-            name = info.filename
-            parts = Path(name).parts
-            if info.is_dir() or name.startswith("__MACOSX") or any(part.startswith(".") for part in parts):
+            if info.is_dir() or info.file_size > MAX_FILE_BYTES or not wanted(info.filename):
                 continue
-            if Path(name).suffix.lower() in SKIP_SUFFIXES or info.file_size > MAX_FILE_BYTES:
-                continue
-            yield name, zf.read(info)
+            yield info.filename, zf.read(info)
 
 
 def expand_files(files):
@@ -316,8 +332,11 @@ def expand_files(files):
 
 def iter_folder(folder: Path):
     for path in sorted(folder.rglob("*")):
-        if path.is_file() and not any(part.startswith(".") for part in path.parts) and path.suffix.lower() not in SKIP_SUFFIXES:
-            yield str(path.relative_to(folder)), path.read_bytes()
+        if not path.is_file():
+            continue
+        relative = str(path.relative_to(folder))
+        if wanted(relative):
+            yield relative, path.read_bytes()
 
 
 def main(argv):
