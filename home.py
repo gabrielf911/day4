@@ -1,6 +1,10 @@
-__import__("pysqlite3")
 import sys
-sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+
+try:
+    __import__("pysqlite3")
+    sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
+except ImportError:
+    pass
 
 import hashlib
 import html
@@ -15,6 +19,8 @@ import streamlit as st
 from openai import OpenAI
 
 from agent import render_agent_tab
+from dd import render_dd_tab
+from ingest import expand_files, index_document
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -345,32 +351,49 @@ metric_a.metric("Documents indexed", sources_indexed)
 metric_b.metric("Searchable passages", total_chunks)
 metric_c.metric("Retrieval", "ChromaDB · cosine")
 
-library_tab, ask_tab, report_tab, agent_tab = st.tabs(["Library", "Ask the collection", "Client report", "Research agent"])
+library_tab, dd_tab, agent_tab, ask_tab, report_tab = st.tabs(
+	["Library", "Due diligence", "Research agent", "Ask the collection", "Client report"]
+)
 
 with library_tab:
 	st.subheader("Document library")
 	st.write("Upload plain-text documents. Text is extracted from each file, lightly profiled, then indexed as overlapping passages.")
 	uploads = st.file_uploader(
 		"Choose documents", accept_multiple_files=True, label_visibility="collapsed",
-		help="Any filename extension is accepted if the file contains readable text. Maximum 20 MB per file.",
+		help="Text files or a .zip of text files. Files already indexed (same path and content) are skipped.",
 	)
 	if st.button("Index documents", type="primary", disabled=not uploads, icon=":material/add:"):
-		progress = st.progress(0, text="Preparing documents…")
-		successes, failures = [], []
-		for index, upload in enumerate(uploads):
+		progress = st.progress(0, text="Reading files…")
+		jobs = []
+		failures = []
+		try:
+			jobs = list(expand_files([(upload.name, upload.getvalue()) for upload in uploads]))
+		except Exception as error:
+			failures.append(f"Could not read the upload: {error}")
+		indexed = skipped = passages = 0
+		for index, (name, raw) in enumerate(jobs):
 			try:
-				count = index_upload(upload, collection, chunk_size, overlap)
-				successes.append(f"{upload.name}: {count} passages")
+				status, count = index_document(collection, raw, name, chunk_size, overlap)
+				if status == "indexed":
+					indexed += 1
+					passages += count
+				else:
+					skipped += 1
 			except Exception as error:
-				failures.append(f"{upload.name}: {error}")
-			progress.progress((index + 1) / len(uploads), text=f"Processed {index + 1} of {len(uploads)}")
+				failures.append(f"{name}: {error}")
+			if index % 10 == 0 or index + 1 == len(jobs):
+				progress.progress((index + 1) / len(jobs), text=f"Processed {index + 1} of {len(jobs)} files")
 		progress.empty()
-		for item in successes:
-			st.success(item)
-		for item in failures:
-			st.error(item)
-		if successes:
-			st.rerun()
+		st.session_state["ingest_summary"] = {
+			"text": f"Indexed {indexed} documents ({passages} passages); skipped {skipped} already indexed; {len(failures)} failed.",
+			"failures": failures[:20],
+		}
+		st.rerun()
+	summary = st.session_state.get("ingest_summary")
+	if summary:
+		(st.warning if summary["failures"] else st.success)(summary["text"])
+		for line in summary["failures"]:
+			st.caption(line)
 
 	if collection.count():
 		st.markdown("#### Indexed sources")
@@ -378,13 +401,21 @@ with library_tab:
 		by_source = {}
 		for item in items:
 			by_source[item["source_id"]] = item
-		for item in sorted(by_source.values(), key=lambda value: value.get("source_name", "").casefold()):
-			col_name, col_meta = st.columns([3, 2])
-			col_name.markdown(f"**{item.get('title', 'Untitled')}**  \n{item.get('source_name', 'Document')}")
-			col_meta.caption(
-				f"{item.get('file_type', 'text').upper()} · {item.get('heading_count', 0)} headings · "
-				f"{item.get('size_bytes', 0):,} bytes · indexed {item.get('uploaded_at', '')[:10]}"
-			)
+		rows = [
+			{
+				"File": value.get("source_path", value.get("source_name", "")),
+				"Type": value.get("doc_type", value.get("file_type", "")),
+				"Title": value.get("title", ""),
+				"Date": value.get("doc_date", ""),
+				"Parties": value.get("parties", ""),
+			}
+			for value in by_source.values()
+		]
+		type_counts = {}
+		for row in rows:
+			type_counts[row["Type"]] = type_counts.get(row["Type"], 0) + 1
+		st.caption(" · ".join(f"{count} {kind}" for kind, count in sorted(type_counts.items())))
+		st.dataframe(sorted(rows, key=lambda r: r["File"].casefold()), hide_index=True)
 	else:
 		st.info("Your library is empty. Upload text documents to create the first searchable collection.")
 
@@ -438,3 +469,6 @@ with report_tab:
 
 with agent_tab:
 	render_agent_tab(collection, ai_client, model, result_limit)
+
+with dd_tab:
+	render_dd_tab(collection, ai_client, model, result_limit)
